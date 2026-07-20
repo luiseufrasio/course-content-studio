@@ -2,6 +2,8 @@ package ai.agentic.samples.course;
 
 import ai.agentic.samples.course.model.CoursePacket;
 import ai.agentic.samples.course.model.CoursePacketRequest;
+import ai.agentic.samples.course.model.LessonApproved;
+import ai.agentic.samples.course.model.PublishedLesson;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
@@ -9,9 +11,13 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.sse.Sse;
+import jakarta.ws.rs.sse.SseEventSink;
 
 import java.util.List;
 
@@ -22,6 +28,7 @@ import java.util.List;
  * {@code Event.fire(...)} is synchronous, the whole agent workflow (all LLM
  * calls) completes before it returns, so the resource can read the finished
  * packet back from the {@link PacketStore} and return it in the same response.
+ * Live progress is streamed separately over {@code /api/progress/{runId}}.
  */
 @Path("/")
 @RequestScoped
@@ -31,16 +38,35 @@ public class CourseResource {
     Event<CoursePacketRequest> trigger;
 
     @Inject
+    Event<LessonApproved> approvals;
+
+    @Inject
     PacketStore store;
 
     @Inject
+    PublishedLessonStore publishedLessons;
+
+    @Inject
     SubjectRubric rubric;
+
+    @Inject
+    ProgressTracker progress;
 
     @GET
     @Path("subjects")
     @Produces(MediaType.APPLICATION_JSON)
     public List<String> subjects() {
         return rubric.subjects();
+    }
+
+    /** Live phase progress for one run, as Server-Sent Events. */
+    @GET
+    @Path("progress/{runId}")
+    @Produces(MediaType.SERVER_SENT_EVENTS)
+    public void progress(@PathParam("runId") String runId,
+                         @Context SseEventSink sink,
+                         @Context Sse sse) {
+        progress.register(runId, sink, sse);
     }
 
     @GET
@@ -61,7 +87,7 @@ public class CourseResource {
         }
         trigger.fire(new CoursePacketRequest(
                 body.subject(), body.chapterTitle(), body.chapterBody(),
-                null, "all", null));
+                null, "all", null, body.runId()));
         return respond(store.current());
     }
 
@@ -71,7 +97,8 @@ public class CourseResource {
     @Produces(MediaType.APPLICATION_JSON)
     public Response refine(RefineRequest body) {
         return refineSection(new RefineSectionRequest("all",
-                body == null ? null : body.instruction()));
+                body == null ? null : body.instruction(),
+                body == null ? null : body.runId()));
     }
 
     @POST
@@ -93,16 +120,38 @@ public class CourseResource {
                 ? "all" : body.section();
         trigger.fire(new CoursePacketRequest(
                 base.getSubject(), base.getChapterTitle(), null,
-                body.instruction(), section, store.currentJson()));
+                body.instruction(), section, store.currentJson(), body.runId()));
         return respond(store.current());
     }
 
     @POST
     @Path("packet/approve")
+    @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response approve() {
+    public Response approve(ApproveRequest body) {
         CoursePacket approved = store.approve();
+        if (approved == null) {
+            return respond(null);
+        }
+        // Chain to the second agent: firing this event triggers PublishAgent,
+        // which builds the student-facing lesson synchronously.
+        approvals.fire(new LessonApproved(
+                approved.getSubject(), approved.getChapterTitle(),
+                store.currentJson(), body == null ? null : body.runId()));
         return respond(approved);
+    }
+
+    /** The student-facing published lesson (produced by PublishAgent). */
+    @GET
+    @Path("lesson")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response lesson() {
+        PublishedLesson lesson = publishedLessons.current();
+        if (lesson == null) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity(new Message("No lesson has been published yet.")).build();
+        }
+        return Response.ok(lesson).build();
     }
 
     private Response respond(CoursePacket packet) {
@@ -113,13 +162,17 @@ public class CourseResource {
         return Response.ok(packet).build();
     }
 
-    public record GenerateRequest(String subject, String chapterTitle, String chapterBody) {
+    public record GenerateRequest(String subject, String chapterTitle, String chapterBody,
+                                  String runId) {
     }
 
-    public record RefineRequest(String instruction) {
+    public record RefineRequest(String instruction, String runId) {
     }
 
-    public record RefineSectionRequest(String section, String instruction) {
+    public record RefineSectionRequest(String section, String instruction, String runId) {
+    }
+
+    public record ApproveRequest(String runId) {
     }
 
     public record Message(String message) {

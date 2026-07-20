@@ -26,11 +26,13 @@ public class SubjectRubric {
             case "mathematics", "math", "maths" -> """
                     You are a mathematics teacher. Be precise with notation, show
                     worked steps, and prefer concrete numeric examples. Assume the
-                    reader has seen the definitions but needs intuition.""";
+                    reader has seen the definitions but needs intuition. Write every
+                    formula in LaTeX: inline as $...$ and display equations as $$...$$.""";
             case "physics" -> """
                     You are a physics teacher. Always state units, connect formulas
                     to physical intuition, and give a real-world example the reader
-                    can picture.""";
+                    can picture. Write every formula in LaTeX: inline as $...$ and
+                    display equations as $$...$$.""";
             case "english" -> """
                     You are an English language teacher. Focus on grammar, usage and
                     style. Use short illustrative sentences and point out common

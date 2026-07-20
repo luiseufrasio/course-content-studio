@@ -1,9 +1,10 @@
 # Course Content Studio — Jakarta Agentic AI sample
 
-An **education** sample for the [Jakarta Agentic AI](https://github.com/) API, running on
-**Payara Server**. A teacher pastes a chapter and picks a subject; the agent
-generates an **introduction**, a **quiz** and a **conclusion**, and the teacher
-can **approve** the result or **refine** any part by chat.
+An **education** sample for the Jakarta Agentic AI API, running on **Payara
+Server**. A teacher pastes a chapter and picks a subject; an agent generates an
+**introduction**, a **quiz** and a **conclusion**; the teacher **refines** any
+part by chat and then **approves & publishes**, which triggers a **second agent**
+that builds the student-facing lesson.
 
 It is a deliberately "advanced" sample — it exercises features the basic
 quickstart does not:
@@ -11,30 +12,38 @@ quickstart does not:
 | Feature | Where |
 |---|---|
 | **Ordered phases** (`@Decision`/`@Action` with `order`) | `CourseContentAgent` — intro → quiz → conclusion |
-| **Typed JSON-B output** (`query(prompt, Quiz.class, …)`) | `writeQuiz` returns a `Quiz` record |
+| **Typed result via JSON-B** | `writeQuiz` binds the model output to a `Quiz` record (parsed defensively, since small models wrap JSON in code fences) |
 | **Per-workflow conversational memory** | `writeConclusion` does not re-send the chapter |
 | **Human-in-the-loop** (generate vs. refine, per section) | event carries the mode; `refine-section` |
-| **Resilience** (`@HandleException`) | `onBadQuiz` re-prompts with a strict schema, then falls back |
-| **Per-subject specialisation** | `SubjectRubric` prepends a subject rubric to prompts |
+| **Multi-agent chaining via CDI events** | approval fires `LessonApproved` → `PublishAgent` builds the lesson |
+| **Resilience** (`@HandleException`) | LLM outage / invalid request handled; unusable quiz JSON falls back to a placeholder |
+| **Per-subject specialisation** | `SubjectRubric` prepends a subject rubric (with LaTeX guidance for maths/physics) |
+| **Live progress (SSE)** | `ProgressTracker` streams each phase to the browser popup |
 
 ## How it works
 
 `CourseResource` fires a `CoursePacketRequest` CDI event. `Event.fire(...)` is
-**synchronous**, so the whole agent workflow (every LLM call) finishes before it
+**synchronous**, so the whole workflow (every LLM call) finishes before it
 returns; the resource then reads the finished `CoursePacket` back from
-`PacketStore` and returns it as JSON.
+`PacketStore`. The agents have **no scope annotation**, so the runtime applies
+`@WorkflowScoped` (the spec default) — that is what makes their instance fields
+safe as per-workflow state across the ordered phases.
 
-The agent has **no scope annotation**, so the runtime applies `@WorkflowScoped`
-(the spec default). That is what makes its `draft` instance field safe as
-per-workflow state across the ordered phases.
+On **approve**, the resource fires a second event, `LessonApproved`, which
+triggers `PublishAgent`. The two agents are composed purely through CDI events,
+with the approval acting as a human-in-the-loop gate between them. Formulas are
+rendered with MathJax in both the studio and the student view.
 
 ```
+GET  /course/                           the studio UI
+GET  /course/student.html               the published lesson, as a student sees it
+GET  /course/api/subjects               subject list
 POST /course/api/packet/generate        { subject, chapterTitle, chapterBody }
 POST /course/api/packet/refine-section  { section: intro|quiz|conclusion|all, instruction }
-POST /course/api/packet/approve
-GET  /course/api/packet                 current packet
-GET  /course/api/subjects               subject list
-GET  /course/                           the UI
+POST /course/api/packet/approve         approve + trigger PublishAgent
+GET  /course/api/packet                 current draft packet
+GET  /course/api/lesson                 published (student-facing) lesson
+GET  /course/api/progress/{runId}       live phase progress (Server-Sent Events)
 ```
 
 ## Prerequisites
@@ -42,22 +51,38 @@ GET  /course/                           the UI
 - JDK 17+
 - Maven 3.9+
 - A **Payara Server 7** build that includes the `agentic-ai-core` runtime module
-  (the module that provides the `jakarta.ai.agent` API and the LLM backends).
-- An LLM backend:
-  - **Ollama** (default, free, local): `ollama pull gemma3:12b`
-  - or **Anthropic/Claude**: set `ANTHROPIC_API_KEY` in the server environment.
+  (it provides the `jakarta.ai.agent` API and the LLM backends).
+- An LLM backend. **Default: Claude on Google Cloud Vertex AI** — fast and
+  reliable for live demos. You need:
+  - a GCP project with a Claude model enabled on Vertex AI, and
+  - Application Default Credentials on the server (`gcloud auth application-default login`).
 
 ## Configure the LLM
 
-Edit `src/main/resources/META-INF/microprofile-config.properties`. The default
-uses Ollama with `gemma3:12b` (recommended over `4b` because the quiz step needs
-clean JSON). To use Claude, uncomment the Anthropic block and export the key
-**before** starting the domain:
+Backend selection is server-side, in
+`src/main/resources/META-INF/microprofile-config.properties`. The default is
+**Vertex** with `claude-sonnet-4-6`:
+
+```properties
+payara.agentic.llm.provider=vertex
+payara.agentic.llm.model=claude-sonnet-4-6
+payara.agentic.llm.max-tokens=8192
+```
+
+Set the project, region and auth in the **server environment before**
+`restart-domain` (project/region fall back to these env vars when the
+properties are absent):
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-asadmin restart-domain
+export ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project
+export CLOUD_ML_REGION=us-east5            # a region where Claude is enabled, or "global"
+gcloud auth application-default login       # or: export GOOGLE_ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
 ```
+
+The file also carries commented blocks for two alternatives — **Anthropic**
+direct (an `ANTHROPIC_API_KEY`) and **local Ollama** (free, but slow on a laptop;
+the backend times out after 120 s, so a big local model can fail the quiz step).
+Uncomment one block, comment the Vertex one, and rebuild.
 
 ## Build & deploy
 
@@ -71,17 +96,23 @@ Then open <http://localhost:8080/course/>.
 ## Try it
 
 1. Pick **Physics**, title `Newton's Second Law`, paste a few paragraphs, click
-   **Generate packet**. Watch `server.log` for
-   `[TRIGGER] → [DECISION] → [ACTION] writeIntro → writeQuiz → writeConclusion → [OUTCOME]`.
+   **Generate packet**. The popup streams the live phases; in `server.log` you'll
+   see `[TRIGGER] → [DECISION] → writeIntro → writeQuiz → writeConclusion → [OUTCOME]`.
+   Formulas are rendered with MathJax.
 2. In **Refine**, choose **Quiz**, type *"make the questions harder and add one
    real-world application"*, click **Refine** — only the quiz changes.
-3. Click **Approve** — the packet is flagged approved.
+3. Click **Approve & publish** — the popup shows the second agent
+   (`PublishAgent`) writing the learning objectives and publishing.
+4. Click **View published lesson ↗** to open `student.html`: objectives, intro,
+   an **interactive quiz** (answer + *Check answers*) and the conclusion.
 
 ## Notes
 
-- This is a single-author demo: `PacketStore` keeps one latest packet. A
-  multi-user app would key packets by author/session.
+- Single-author demo: `PacketStore` / `PublishedLessonStore` keep one latest
+  artifact. A multi-user app would key them by author/session.
 - The quiz gate (`hasTeachableContent`) requires ≥ 80 characters of chapter text
   in generate mode; short snippets stop the workflow at the decision phase.
+- The studio and the student view load **MathJax from a CDN**; for an offline
+  demo, self-host it.
 - If the configured provider is `none` (no backend), the runtime's no-op LLM
   returns empty content and the packet will be blank — set a real provider.

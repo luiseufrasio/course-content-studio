@@ -15,6 +15,8 @@ import jakarta.validation.constraints.NotBlank;
  * {@code section} scopes a refinement to a single part ({@code "intro"},
  * {@code "quiz"}, {@code "conclusion"}) or the whole packet ({@code "all"} /
  * null), so refining the quiz never disturbs the introduction.
+ * <p>
+ * {@code runId} correlates this run with the browser's live-progress SSE stream.
  *
  * @param subject          the subject area (e.g. {@code "Mathematics"}); shapes
  *                         the writing rubric
@@ -23,6 +25,7 @@ import jakarta.validation.constraints.NotBlank;
  * @param instruction      the teacher's refinement instruction (refine mode)
  * @param section          which part to (re)write: {@code intro|quiz|conclusion|all}
  * @param currentDraftJson JSON of the current packet, or null to generate
+ * @param runId            correlation id for the live-progress SSE stream
  */
 public record CoursePacketRequest(
         @NotBlank String subject,
@@ -30,7 +33,8 @@ public record CoursePacketRequest(
         String chapterBody,
         String instruction,
         String section,
-        String currentDraftJson) {
+        String currentDraftJson,
+        String runId) {
 
     /** True when there is no existing draft, i.e. we generate from scratch. */
     public boolean isGenerate() {

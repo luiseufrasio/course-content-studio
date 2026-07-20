@@ -24,9 +24,9 @@ import java.util.logging.Logger;
  * the teacher's request.
  * <p>
  * No scope annotation is present, so the runtime applies {@code @WorkflowScoped}
- * (the specification default). That is what makes the {@link #draft} instance
- * field safe to use as per-workflow state: one agent instance exists per
- * workflow execution, so the ordered actions can build the packet up
+ * (the specification default). That is what makes the {@link #draft} and
+ * {@link #runId} instance fields safe as per-workflow state: one agent instance
+ * exists per workflow execution, so the ordered actions build the packet up
  * incrementally without leaking across concurrent requests.
  * <p>
  * Features on show:
@@ -34,16 +34,20 @@ import java.util.logging.Logger;
  *   <li><b>Ordered phases</b> — {@code @Decision}/{@code @Action} carry an
  *       explicit {@code order}, so intro &rarr; quiz &rarr; conclusion run in a
  *       guaranteed sequence (all phases must be ordered once any is).</li>
- *   <li><b>Typed JSON-B output</b> — the quiz comes back as a {@link Quiz}
- *       record straight from {@code query(prompt, Quiz.class, ...)}.</li>
+ *   <li><b>Typed result via JSON-B</b> — the quiz is deserialized into a
+ *       {@link Quiz} record. Small local models often wrap JSON in code fences,
+ *       so we parse defensively rather than call the facade's typed overload
+ *       (which would throw on the fences).</li>
  *   <li><b>Per-workflow conversational memory</b> — the conclusion query does
  *       not re-send the chapter; it relies on the earlier turns of the same
  *       workflow.</li>
  *   <li><b>Human-in-the-loop</b> — the event carries the mode (generate vs.
  *       refine) and a target section, so the teacher can refine one part.</li>
- *   <li><b>Resilience</b> — {@code @HandleException} recovers from a malformed
- *       quiz by re-prompting with a strict schema, falling back to a placeholder
- *       so the packet is still published.</li>
+ *   <li><b>Resilience</b> — a placeholder quiz keeps the workflow moving when the
+ *       model returns unusable JSON; {@code @HandleException} covers LLM outages
+ *       and invalid requests.</li>
+ *   <li><b>Live progress</b> — each phase reports to {@link ProgressTracker} so
+ *       the browser popup shows what the agent is doing.</li>
  * </ul>
  */
 @Agent(name = "CourseContentAgent",
@@ -66,19 +70,26 @@ public class CourseContentAgent {
     @Inject
     PacketStore store;
 
-    /** Per-workflow state: the packet being built or refined. */
+    @Inject
+    ProgressTracker progress;
+
+    /** Per-workflow state. */
     private CoursePacket draft;
+    private String runId;
 
     @Trigger
     void onRequest(@Valid CoursePacketRequest request) {
+        runId = request.runId();
         if (request.isGenerate()) {
             draft = new CoursePacket(request.subject(), request.chapterTitle());
             LOGGER.info("[TRIGGER] generate packet for " + request.subject()
                     + " / " + request.chapterTitle());
+            progress.publish(runId, "Trigger — new " + request.subject() + " chapter received");
         } else {
             draft = Json.instance().fromJson(request.currentDraftJson(), CoursePacket.class);
             LOGGER.info("[TRIGGER] refine section '" + request.section()
                     + "' with instruction: " + request.instruction());
+            progress.publish(runId, "Trigger — refine '" + request.section() + "'");
         }
     }
 
@@ -88,6 +99,12 @@ public class CourseContentAgent {
                 ? request.chapterBody() != null && request.chapterBody().strip().length() >= 80
                 : draft != null;
         LOGGER.info("[DECISION] hasTeachableContent=" + ok);
+        if (ok) {
+            progress.publish(runId, "Decision — content looks teachable");
+        } else {
+            progress.publish(runId, "Decision — not enough content, stopping");
+            progress.complete(runId);
+        }
         return ok;
     }
 
@@ -97,6 +114,7 @@ public class CourseContentAgent {
             return;
         }
         LOGGER.info("[ACTION] writeIntro");
+        progress.publish(runId, "Writing the introduction…");
         if (request.isGenerate()) {
             draft.setIntro(model.query(
                     rubric.forSubject(request.subject())
@@ -116,18 +134,21 @@ public class CourseContentAgent {
         if (!request.targets("quiz")) {
             return;
         }
-        LOGGER.info("[ACTION] writeQuiz (typed)");
+        LOGGER.info("[ACTION] writeQuiz");
+        progress.publish(runId, "Writing the quiz (typed JSON-B)…");
+        String raw;
         if (request.isGenerate()) {
-            draft.setQuiz(model.query(
+            raw = model.query(
                     rubric.forSubject(request.subject())
                             + "\nCreate exactly 4 multiple-choice questions based on this chapter. "
                             + QUIZ_SCHEMA + "\nChapter:\n{}",
-                    Quiz.class, request.chapterBody()));
+                    request.chapterBody());
         } else {
-            draft.setQuiz(model.query(
+            raw = model.query(
                     "Current quiz JSON:\n{}\n\nApply this change: {}\n" + QUIZ_SCHEMA,
-                    Quiz.class, draft.getQuiz(), request.instruction()));
+                    draft.getQuiz(), request.instruction());
         }
+        draft.setQuiz(parseQuiz(raw));
     }
 
     @Action(order = 30)
@@ -136,13 +157,15 @@ public class CourseContentAgent {
             return;
         }
         LOGGER.info("[ACTION] writeConclusion (uses workflow memory)");
+        progress.publish(runId, "Writing the conclusion (from workflow memory)…");
         if (request.isGenerate()) {
             // No chapter re-sent: relies on the intro and quiz produced earlier
             // in this same workflow (per-workflow conversational state).
             draft.setConclusion(model.query(
                     "Based on the chapter and the introduction and quiz you just produced, "
                             + "write a concise one-paragraph conclusion that ties them together. "
-                            + "Return plain prose only."));
+                            + "Return plain prose only. Use LaTeX for any formula "
+                            + "(inline $...$, display $$...$$)."));
         } else {
             draft.setConclusion(model.query(
                     "Current conclusion:\n{}\n\nApply this change and return only the "
@@ -155,28 +178,63 @@ public class CourseContentAgent {
     void publish(CoursePacketRequest request) {
         store.publish(draft);
         LOGGER.info("[OUTCOME] packet published for " + draft.getChapterTitle());
+        progress.publish(runId, "Outcome — packet ready");
+        progress.complete(runId);
     }
 
     @HandleException
-    void onBadQuiz(LLMException e) {
-        LOGGER.warning("[HANDLE] quiz step failed (" + e.getMessage()
-                + ") — retrying with strict schema");
-        try {
-            draft.setQuiz(model.query(
-                    "Regenerate the quiz. " + QUIZ_SCHEMA, Quiz.class));
-        } catch (RuntimeException retryFailed) {
-            LOGGER.warning("[HANDLE] strict retry failed too; using placeholder quiz");
-            draft.setQuiz(new Quiz(List.of(new QuizQuestion(
-                    "Quiz generation failed — please refine or regenerate.",
-                    List.of("OK"), 0, "The model did not return valid quiz JSON."))));
+    void onLlmFailure(LLMException e) {
+        LOGGER.warning("[HANDLE] LLM failure: " + e.getMessage());
+        progress.publish(runId, "LLM error — publishing what we have");
+        if (draft != null) {
+            store.publish(draft);
         }
-        // Still publish so the teacher keeps the intro/conclusion already produced.
-        store.publish(draft);
+        progress.complete(runId);
     }
 
     @HandleException
     void onInvalidRequest(ConstraintViolationException e) {
         LOGGER.warning("[HANDLE] invalid request rejected: " + e.getMessage());
-        // Nothing published; the REST layer reports "no packet".
+        progress.publish(runId, "Invalid request rejected");
+        progress.complete(runId);
+    }
+
+    /**
+     * Deserializes the quiz defensively: strips any markdown code fences and
+     * surrounding prose, extracts the JSON object, and binds it to {@link Quiz}
+     * with Jakarta JSON Binding. Falls back to a placeholder so a bad model
+     * response never aborts the workflow.
+     */
+    private Quiz parseQuiz(String raw) {
+        try {
+            Quiz quiz = Json.instance().fromJson(extractJson(raw), Quiz.class);
+            if (quiz != null && quiz.questions() != null && !quiz.questions().isEmpty()) {
+                return quiz;
+            }
+        } catch (RuntimeException parseFailed) {
+            LOGGER.warning("[ACTION] quiz JSON parse failed: " + parseFailed.getMessage());
+        }
+        LOGGER.warning("[ACTION] quiz JSON unusable; using placeholder");
+        progress.publish(runId, "Quiz JSON was unusable — inserted a placeholder");
+        return placeholderQuiz();
+    }
+
+    private static String extractJson(String raw) {
+        if (raw == null) {
+            return "{}";
+        }
+        String text = raw.replace("```json", " ")
+                .replace("```JSON", " ")
+                .replace("```", " ")
+                .trim();
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        return start >= 0 && end >= start ? text.substring(start, end + 1) : "{}";
+    }
+
+    private static Quiz placeholderQuiz() {
+        return new Quiz(List.of(new QuizQuestion(
+                "Quiz generation returned no valid JSON — try Refine → Quiz, or a stronger model.",
+                List.of("OK"), 0, "The model did not produce parseable quiz JSON.")));
     }
 }
