@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Course Content Studio — Jakarta Agentic AI</title>
+    <style>
+        :root {
+            --bg: #0f172a; --panel: #1e293b; --muted: #94a3b8; --text: #e2e8f0;
+            --accent: #38bdf8; --accent2: #22c55e; --border: #334155; --good: #16a34a;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            background: var(--bg); color: var(--text); line-height: 1.5;
+        }
+        header { padding: 18px 28px; border-bottom: 1px solid var(--border); }
+        header h1 { margin: 0; font-size: 20px; }
+        header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+        .layout { display: grid; grid-template-columns: 380px 1fr; gap: 0; min-height: calc(100vh - 66px); }
+        .col { padding: 22px 26px; }
+        .col.left { border-right: 1px solid var(--border); }
+        label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+            color: var(--muted); margin: 14px 0 6px; }
+        select, input, textarea {
+            width: 100%; background: var(--panel); color: var(--text);
+            border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 14px;
+            font-family: inherit;
+        }
+        textarea { resize: vertical; min-height: 180px; }
+        button {
+            background: var(--accent); color: #04263a; border: none; border-radius: 8px;
+            padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 14px;
+        }
+        button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+        button.approve { background: var(--accent2); color: #05310f; }
+        button:disabled { opacity: .5; cursor: not-allowed; }
+        .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+            padding: 18px 20px; margin-bottom: 18px; }
+        .card h2 { margin: 0 0 10px; font-size: 15px; color: var(--accent); }
+        .q { margin-bottom: 16px; }
+        .q .prompt { font-weight: 600; margin-bottom: 6px; }
+        .q ul { list-style: none; padding: 0; margin: 0; }
+        .q li { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; margin: 4px 0; }
+        .q li.correct { border-color: var(--good); background: rgba(22,163,74,.15); }
+        .q .exp { color: var(--muted); font-size: 13px; margin-top: 6px; }
+        .row { display: flex; gap: 10px; align-items: flex-end; }
+        .row > * { margin-top: 0; }
+        .refine { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+        .refine select { width: 150px; }
+        .refine input { flex: 1; min-width: 200px; }
+        .status { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 18px; }
+        .badge { display: inline-block; background: var(--good); color: #eafff0; font-size: 11px;
+            padding: 2px 8px; border-radius: 999px; margin-left: 8px; vertical-align: middle; }
+        .empty { color: var(--muted); text-align: center; margin-top: 60px; }
+        .prose { white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>Course Content Studio <span id="approvedBadge" class="badge" style="display:none">approved</span></h1>
+    <p>An agent that writes the intro, quiz and conclusion for a chapter — you review, approve or refine.</p>
+</header>
+
+<div class="layout">
+    <!-- LEFT: chapter input -->
+    <div class="col left">
+        <label for="subject">Subject</label>
+        <select id="subject"></select>
+
+        <label for="title">Chapter title</label>
+        <input id="title" placeholder="e.g. Newton's Second Law"/>
+
+        <label for="body">Chapter content</label>
+        <textarea id="body" placeholder="Paste the chapter text here (at least a couple of paragraphs)…"></textarea>
+
+        <button id="generateBtn">Generate packet</button>
+        <div id="leftStatus" class="status"></div>
+    </div>
+
+    <!-- RIGHT: generated packet -->
+    <div class="col right">
+        <div id="empty" class="empty">No packet yet. Fill in a chapter and click <b>Generate packet</b>.</div>
+
+        <div id="packet" style="display:none">
+            <div class="card">
+                <h2>Introduction</h2>
+                <div id="intro" class="prose"></div>
+            </div>
+            <div class="card">
+                <h2>Quiz</h2>
+                <div id="quiz"></div>
+            </div>
+            <div class="card">
+                <h2>Conclusion</h2>
+                <div id="conclusion" class="prose"></div>
+            </div>
+
+            <div class="card">
+                <h2>Review</h2>
+                <div class="refine">
+                    <div>
+                        <label for="section">Refine</label>
+                        <select id="section">
+                            <option value="all">Whole packet</option>
+                            <option value="intro">Introduction</option>
+                            <option value="quiz">Quiz</option>
+                            <option value="conclusion">Conclusion</option>
+                        </select>
+                    </div>
+                    <input id="instruction" placeholder="e.g. make the quiz harder and add a real-world question"/>
+                    <button id="refineBtn" class="secondary">Refine</button>
+                    <button id="approveBtn" class="approve">Approve</button>
+                </div>
+                <div id="rightStatus" class="status"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const $ = id => document.getElementById(id);
+
+    async function loadSubjects() {
+        const res = await fetch('api/subjects');
+        const list = await res.json();
+        $('subject').innerHTML = list.map(s => `<option>${s}</option>`).join('');
+    }
+
+    function escapeHtml(s) {
+        return (s ?? '').replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+    }
+
+    function renderPacket(p) {
+        $('empty').style.display = 'none';
+        $('packet').style.display = 'block';
+        $('intro').textContent = p.intro ?? '';
+        $('conclusion').textContent = p.conclusion ?? '';
+        $('approvedBadge').style.display = p.approved ? 'inline-block' : 'none';
+
+        const questions = (p.quiz && p.quiz.questions) || [];
+        $('quiz').innerHTML = questions.map((q, i) => {
+            const opts = (q.options || []).map((o, j) =>
+                `<li class="${j === q.correctIndex ? 'correct' : ''}">${escapeHtml(o)}</li>`).join('');
+            return `<div class="q">
+                        <div class="prompt">${i + 1}. ${escapeHtml(q.prompt)}</div>
+                        <ul>${opts}</ul>
+                        <div class="exp">${escapeHtml(q.explanation)}</div>
+                    </div>`;
+        }).join('') || '<div class="exp">No questions.</div>';
+    }
+
+    async function post(url, body, statusEl, btn) {
+        const original = btn.textContent;
+        btn.disabled = true; btn.textContent = 'Working…';
+        statusEl.textContent = 'Calling the agent (the workflow runs synchronously)…';
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: body ? {'Content-Type': 'application/json'} : {},
+                body: body ? JSON.stringify(body) : undefined
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                statusEl.textContent = data.message || ('Error ' + res.status);
+                return null;
+            }
+            statusEl.textContent = 'Done.';
+            return data;
+        } catch (e) {
+            statusEl.textContent = 'Request failed: ' + e;
+            return null;
+        } finally {
+            btn.disabled = false; btn.textContent = original;
+        }
+    }
+
+    $('generateBtn').onclick = async () => {
+        const packet = await post('api/packet/generate', {
+            subject: $('subject').value,
+            chapterTitle: $('title').value,
+            chapterBody: $('body').value
+        }, $('leftStatus'), $('generateBtn'));
+        if (packet) renderPacket(packet);
+    };
+
+    $('refineBtn').onclick = async () => {
+        const packet = await post('api/packet/refine-section', {
+            section: $('section').value,
+            instruction: $('instruction').value
+        }, $('rightStatus'), $('refineBtn'));
+        if (packet) { renderPacket(packet); $('instruction').value = ''; }
+    };
+
+    $('approveBtn').onclick = async () => {
+        const packet = await post('api/packet/approve', null, $('rightStatus'), $('approveBtn'));
+        if (packet) renderPacket(packet);
+    };
+
+    loadSubjects();
+</script>
+</body>
+</html>
