@@ -18,4 +18,22 @@ public final class Json {
     public static Jsonb instance() {
         return JSONB;
     }
+
+    /**
+     * Strips markdown code fences and surrounding prose from a model response
+     * and returns the outermost {@code {...}} JSON object (or {@code "{}"} if
+     * none is found), so small models that wrap JSON in fences still parse.
+     */
+    public static String extractJson(String raw) {
+        if (raw == null) {
+            return "{}";
+        }
+        String text = raw.replace("```json", " ")
+                .replace("```JSON", " ")
+                .replace("```", " ")
+                .trim();
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        return start >= 0 && end >= start ? text.substring(start, end + 1) : "{}";
+    }
 }

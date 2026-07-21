@@ -4,6 +4,9 @@ import ai.agentic.samples.course.model.CoursePacket;
 import ai.agentic.samples.course.model.CoursePacketRequest;
 import ai.agentic.samples.course.model.LessonApproved;
 import ai.agentic.samples.course.model.PublishedLesson;
+import ai.agentic.samples.course.model.Quiz;
+import ai.agentic.samples.course.model.QuizQuestion;
+import jakarta.ai.agent.LargeLanguageModel;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
@@ -20,6 +23,8 @@ import jakarta.ws.rs.sse.Sse;
 import jakarta.ws.rs.sse.SseEventSink;
 
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * REST surface for the Course Content Studio.
@@ -45,6 +50,9 @@ public class CourseResource {
 
     @Inject
     PublishedLessonStore publishedLessons;
+
+    @Inject
+    LargeLanguageModel model;
 
     @Inject
     SubjectRubric rubric;
@@ -154,6 +162,58 @@ public class CourseResource {
         return Response.ok(lesson).build();
     }
 
+    /**
+     * Grades a student's free-text answer to an open question by asking the LLM
+     * for a 0–100 semantic-similarity score against the model answer, then maps
+     * it to a verdict: >= 70 correct, 50–69 partial, &lt; 50 incorrect.
+     */
+    @POST
+    @Path("quiz/grade")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response grade(GradeRequest body) {
+        PublishedLesson lesson = publishedLessons.current();
+        Quiz quiz = lesson == null ? null : lesson.getQuiz();
+        if (quiz == null || quiz.questions() == null
+                || body == null || body.questionIndex() < 0
+                || body.questionIndex() >= quiz.questions().size()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(new Message("Unknown question.")).build();
+        }
+        QuizQuestion question = quiz.questions().get(body.questionIndex());
+        if (!question.isOpen()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(new Message("That question is not an open question.")).build();
+        }
+        int similarity = gradeSimilarity(question.prompt(), question.sampleAnswer(),
+                body.studentAnswer());
+        String verdict = similarity >= 70 ? "correct"
+                : similarity >= 50 ? "partial" : "incorrect";
+        return Response.ok(new GradeResponse(similarity, verdict, question.sampleAnswer())).build();
+    }
+
+    private int gradeSimilarity(String prompt, String modelAnswer, String studentAnswer) {
+        if (studentAnswer == null || studentAnswer.isBlank()
+                || modelAnswer == null || modelAnswer.isBlank()) {
+            return 0;
+        }
+        String raw = model.query(
+                "Grade a student's open answer. Question: {}\nModel answer: {}\n"
+                        + "Student answer: {}\nRate from 0 to 100 how well the student's answer "
+                        + "matches the model answer in meaning. Return ONLY JSON: {\"similarity\": N}",
+                prompt, modelAnswer, studentAnswer);
+        try {
+            Similarity s = Json.instance().fromJson(Json.extractJson(raw), Similarity.class);
+            return Math.max(0, Math.min(100, s.similarity()));
+        } catch (RuntimeException parseFailed) {
+            Matcher m = Pattern.compile("\\d{1,3}").matcher(raw == null ? "" : raw);
+            if (m.find()) {
+                return Math.max(0, Math.min(100, Integer.parseInt(m.group())));
+            }
+            return 0;
+        }
+    }
+
     private Response respond(CoursePacket packet) {
         if (packet == null) {
             return Response.status(Response.Status.NOT_FOUND)
@@ -173,6 +233,15 @@ public class CourseResource {
     }
 
     public record ApproveRequest(String runId) {
+    }
+
+    public record GradeRequest(int questionIndex, String studentAnswer) {
+    }
+
+    public record GradeResponse(int similarity, String verdict, String sampleAnswer) {
+    }
+
+    public record Similarity(int similarity) {
     }
 
     public record Message(String message) {

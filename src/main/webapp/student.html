@@ -10,7 +10,7 @@
             svg: {fontCache: 'global'}
         };
     </script>
-    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+    <script src="vendor/mathjax/tex-svg.js" async></script>
     <style>
         :root { --ink: #16324d; --muted: #5a728c; --line: #dce6f1; --accent: #1c6fb8;
             --good: #16a34a; --good-bg: #e7f7ee; --bad: #dc2626; --bad-bg: #fdeaea; }
@@ -45,6 +45,16 @@
         .exp { display: none; margin-top: 10px; font-size: 14px; color: var(--muted);
             font-family: system-ui, sans-serif; }
         .exp.show { display: block; }
+        .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; padding: 2px 8px;
+            border-radius: 999px; margin-left: 8px; vertical-align: middle; background: #e6eff8;
+            color: var(--accent); font-family: system-ui, sans-serif; }
+        .answer { width: 100%; font-family: system-ui, sans-serif; font-size: 14px; padding: 10px 12px;
+            border: 1px solid var(--line); border-radius: 8px; resize: vertical; min-height: 72px;
+            margin-top: 4px; }
+        .verdict { font-family: system-ui, sans-serif; font-size: 14px; font-weight: 600; margin-top: 10px; }
+        .verdict.correct { color: var(--good); }
+        .verdict.partial { color: #b45309; }
+        .verdict.incorrect { color: var(--bad); }
         button { font-family: system-ui, sans-serif; font-size: 14px; font-weight: 600; cursor: pointer;
             border: none; border-radius: 9px; padding: 11px 20px; color: #fff; margin-top: 8px;
             background: linear-gradient(180deg, #2b8fe0, var(--accent)); }
@@ -82,6 +92,13 @@
         const objectives = (l.objectives || []).map(o => `<li>${escapeHtml(o)}</li>`).join('');
         const questions = (l.quiz && l.quiz.questions) || [];
         const quiz = questions.map((q, i) => {
+            if (q.type === 'open') {
+                return `<div class="q"><div class="prompt">${i + 1}. ${escapeHtml(q.prompt)}
+                        <span class="tag">open response</span></div>
+                        <textarea class="answer" id="ans${i}" placeholder="Type your answer…"></textarea>
+                        <div class="verdict" id="verdict${i}"></div>
+                        <div class="exp" id="exp${i}"><b>Model answer:</b> ${escapeHtml(q.sampleAnswer)}</div></div>`;
+            }
             const opts = (q.options || []).map((o, j) =>
                 `<label class="opt" data-q="${i}" data-o="${j}">
                     <input type="radio" name="q${i}" value="${j}">${escapeHtml(o)}</label>`).join('');
@@ -109,17 +126,47 @@
 
         const checkBtn = $('check');
         if (checkBtn) {
-            checkBtn.onclick = () => {
-                questions.forEach((q, i) => {
-                    const chosen = document.querySelector(`input[name="q${i}"]:checked`);
-                    document.querySelectorAll(`.opt[data-q="${i}"]`).forEach(el => {
-                        const o = Number(el.dataset.o);
-                        el.classList.remove('correct', 'wrong');
-                        if (o === q.correctIndex) el.classList.add('correct');
-                        else if (chosen && Number(chosen.value) === o) el.classList.add('wrong');
-                    });
-                    $('exp' + i).classList.add('show');
-                });
+            checkBtn.onclick = async () => {
+                const original = checkBtn.textContent;
+                checkBtn.disabled = true; checkBtn.textContent = 'Checking…';
+                for (let i = 0; i < questions.length; i++) {
+                    const q = questions[i];
+                    if (q.type === 'open') {
+                        const answer = ($('ans' + i) && $('ans' + i).value) || '';
+                        const v = $('verdict' + i);
+                        v.className = 'verdict'; v.textContent = 'Grading…';
+                        try {
+                            const res = await fetch('api/quiz/grade', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({questionIndex: i, studentAnswer: answer})
+                            });
+                            const data = await res.json();
+                            if (res.ok) {
+                                const label = data.verdict === 'correct' ? 'Correct'
+                                    : data.verdict === 'partial' ? 'Partially correct' : 'Incorrect';
+                                v.textContent = `${label} — ${data.similarity}% match`;
+                                v.classList.add(data.verdict);
+                            } else {
+                                v.textContent = data.message || 'Could not grade.';
+                            }
+                        } catch (e) {
+                            v.textContent = 'Grading failed.';
+                        }
+                        $('exp' + i).classList.add('show');
+                    } else {
+                        const chosen = document.querySelector(`input[name="q${i}"]:checked`);
+                        document.querySelectorAll(`.opt[data-q="${i}"]`).forEach(el => {
+                            const o = Number(el.dataset.o);
+                            el.classList.remove('correct', 'wrong');
+                            if (o === q.correctIndex) el.classList.add('correct');
+                            else if (chosen && Number(chosen.value) === o) el.classList.add('wrong');
+                        });
+                        $('exp' + i).classList.add('show');
+                    }
+                }
+                checkBtn.disabled = false; checkBtn.textContent = original;
+                typeset();
             };
         }
         typeset();

@@ -10,7 +10,7 @@
             svg: {fontCache: 'global'}
         };
     </script>
-    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+    <script src="vendor/mathjax/tex-svg.js" async></script>
     <style>
         :root {
             --steel-1: #0b1f33; --steel-2: #12314f; --steel-3: #1c4a75;
@@ -101,6 +101,10 @@
             background: rgba(9,26,43,.5); }
         .q li.correct { border-color: var(--good); background: rgba(52,211,153,.16); }
         .q .exp { color: var(--muted); font-size: 13px; margin-top: 6px; }
+        .q .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; padding: 2px 8px;
+            border-radius: 999px; margin-left: 8px; vertical-align: middle; color: #04263f;
+            background: linear-gradient(180deg, var(--sheen-hi), var(--sheen)); }
+        .q textarea[disabled] { min-height: 0; opacity: .7; margin-top: 6px; }
 
         .refine { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
         .refine > div { margin: 0; }
@@ -229,6 +233,12 @@
         $('approvedBadge').style.display = p.approved ? 'inline-block' : 'none';
         const questions = (p.quiz && p.quiz.questions) || [];
         $('quiz').innerHTML = questions.map((q, i) => {
+            if (q.type === 'open') {
+                return `<div class="q"><div class="prompt">${i + 1}. ${escapeHtml(q.prompt)}
+                        <span class="tag">open response</span></div>
+                        <textarea rows="2" disabled placeholder="Student answers in free text…"></textarea>
+                        <div class="exp"><b>Model answer:</b> ${escapeHtml(q.sampleAnswer)}</div></div>`;
+            }
             const opts = (q.options || []).map((o, j) =>
                 `<li class="${j === q.correctIndex ? 'correct' : ''}">${escapeHtml(o)}</li>`).join('');
             return `<div class="q"><div class="prompt">${i + 1}. ${escapeHtml(q.prompt)}</div>

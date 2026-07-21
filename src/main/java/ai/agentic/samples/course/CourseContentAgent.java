@@ -16,6 +16,7 @@ import jakarta.inject.Inject;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Valid;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
 
@@ -57,9 +58,13 @@ public class CourseContentAgent {
     private static final Logger LOGGER = Logger.getLogger(CourseContentAgent.class.getName());
 
     private static final String QUIZ_SCHEMA =
-            "Return ONLY valid JSON, no markdown fences, of the exact form: "
-            + "{\"questions\":[{\"prompt\":\"...\",\"options\":[\"a\",\"b\",\"c\",\"d\"],"
-            + "\"correctIndex\":0,\"explanation\":\"...\"}]}";
+            "Return ONLY valid JSON, no markdown fences. Each question has a \"type\". "
+            + "Multiple-choice: {\"type\":\"multiple_choice\",\"prompt\":\"...\","
+            + "\"options\":[\"a\",\"b\",\"c\",\"d\"],\"correctIndex\":0,\"explanation\":\"...\"}. "
+            + "Open/subjective (student answers in free text): "
+            + "{\"type\":\"open\",\"prompt\":\"...\",\"sampleAnswer\":\"a concise model answer\"}. "
+            + "Wrap them as {\"questions\":[ ... ]}. Use \"multiple_choice\" unless an open "
+            + "question is explicitly requested.";
 
     @Inject
     LargeLanguageModel model;
@@ -207,9 +212,9 @@ public class CourseContentAgent {
      */
     private Quiz parseQuiz(String raw) {
         try {
-            Quiz quiz = Json.instance().fromJson(extractJson(raw), Quiz.class);
+            Quiz quiz = Json.instance().fromJson(Json.extractJson(raw), Quiz.class);
             if (quiz != null && quiz.questions() != null && !quiz.questions().isEmpty()) {
-                return quiz;
+                return normalize(quiz);
             }
         } catch (RuntimeException parseFailed) {
             LOGGER.warning("[ACTION] quiz JSON parse failed: " + parseFailed.getMessage());
@@ -219,22 +224,25 @@ public class CourseContentAgent {
         return placeholderQuiz();
     }
 
-    private static String extractJson(String raw) {
-        if (raw == null) {
-            return "{}";
+    /** Fills a missing {@code type}: open when there are no options, else MCQ. */
+    private static Quiz normalize(Quiz quiz) {
+        List<QuizQuestion> fixed = new ArrayList<>();
+        for (QuizQuestion q : quiz.questions()) {
+            String type = q.type();
+            if (type == null || type.isBlank()) {
+                boolean hasOptions = q.options() != null && !q.options().isEmpty();
+                type = hasOptions ? QuizQuestion.MULTIPLE_CHOICE : QuizQuestion.OPEN;
+            }
+            fixed.add(new QuizQuestion(q.prompt(), type, q.options(),
+                    q.correctIndex(), q.explanation(), q.sampleAnswer()));
         }
-        String text = raw.replace("```json", " ")
-                .replace("```JSON", " ")
-                .replace("```", " ")
-                .trim();
-        int start = text.indexOf('{');
-        int end = text.lastIndexOf('}');
-        return start >= 0 && end >= start ? text.substring(start, end + 1) : "{}";
+        return new Quiz(fixed);
     }
 
     private static Quiz placeholderQuiz() {
         return new Quiz(List.of(new QuizQuestion(
                 "Quiz generation returned no valid JSON — try Refine → Quiz, or a stronger model.",
-                List.of("OK"), 0, "The model did not produce parseable quiz JSON.")));
+                QuizQuestion.MULTIPLE_CHOICE, List.of("OK"), 0,
+                "The model did not produce parseable quiz JSON.", null)));
     }
 }

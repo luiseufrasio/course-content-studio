@@ -19,6 +19,7 @@ quickstart does not:
 | **Resilience** (`@HandleException`) | LLM outage / invalid request handled; unusable quiz JSON falls back to a placeholder |
 | **Per-subject specialisation** | `SubjectRubric` prepends a subject rubric (with LaTeX guidance for maths/physics) |
 | **Live progress (SSE)** | `ProgressTracker` streams each phase to the browser popup |
+| **Polymorphic quiz + LLM grading** | open questions graded by semantic similarity via `POST /api/quiz/grade` (`@Dependent` LLM used directly, no agent) |
 
 ## How it works
 
@@ -43,6 +44,7 @@ POST /course/api/packet/refine-section  { section: intro|quiz|conclusion|all, in
 POST /course/api/packet/approve         approve + trigger PublishAgent
 GET  /course/api/packet                 current draft packet
 GET  /course/api/lesson                 published (student-facing) lesson
+POST /course/api/quiz/grade             grade an open answer via the LLM (similarity)
 GET  /course/api/progress/{runId}       live phase progress (Server-Sent Events)
 ```
 
@@ -99,12 +101,16 @@ Then open <http://localhost:8080/course/>.
    **Generate packet**. The popup streams the live phases; in `server.log` you'll
    see `[TRIGGER] → [DECISION] → writeIntro → writeQuiz → writeConclusion → [OUTCOME]`.
    Formulas are rendered with MathJax.
-2. In **Refine**, choose **Quiz**, type *"make the questions harder and add one
-   real-world application"*, click **Refine** — only the quiz changes.
+2. In **Refine**, choose **Quiz**, type *"make the questions harder and add a
+   final open question for the student to answer in free text"*, click **Refine**
+   — only the quiz changes, and the open question comes back with `type: "open"`.
 3. Click **Approve & publish** — the popup shows the second agent
    (`PublishAgent`) writing the learning objectives and publishing.
 4. Click **View published lesson ↗** to open `student.html`: objectives, intro,
-   an **interactive quiz** (answer + *Check answers*) and the conclusion.
+   and an **interactive quiz**. Multiple-choice questions are checked locally;
+   the **open question** shows a textarea, and *Check answers* grades it via the
+   LLM (**≥ 70 %** correct, **50–69 %** partial, **< 50 %** incorrect) and reveals
+   the model answer.
 
 ## Notes
 
@@ -112,7 +118,7 @@ Then open <http://localhost:8080/course/>.
   artifact. A multi-user app would key them by author/session.
 - The quiz gate (`hasTeachableContent`) requires ≥ 80 characters of chapter text
   in generate mode; short snippets stop the workflow at the decision phase.
-- The studio and the student view load **MathJax from a CDN**; for an offline
-  demo, self-host it.
+- MathJax is **self-hosted** in the WAR (`webapp/vendor/mathjax/tex-svg.js`), so
+  formula rendering works fully offline.
 - If the configured provider is `none` (no backend), the runtime's no-op LLM
   returns empty content and the packet will be blank — set a real provider.
